@@ -1,0 +1,54 @@
+{
+	"name": "@clementprevot/pi-session-relocate",
+	"version": "0.1.0",
+	"description": "Pi extension that moves or copies a session to another working directory, with its subagent runs and links, from either end: /migrate pulls one here, /move pushes the current one away",
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"session",
+		"move",
+		"migrate",
+		"worktree"
+	],
+	"license": "MIT",
+	"type": "module",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/clementprevot/pi-session-relocate.git"
+	},
+	"engines": {
+		"node": ">=22.6"
+	},
+	"files": [
+		"index.ts",
+		"guards.ts",
+		"journal.ts",
+		"picker.ts",
+		"relocate.ts",
+		"session-search.ts",
+		"targets.ts",
+		"trash.ts"
+	],
+	"pi": {
+		"extensions": [
+			"./index.ts"
+		]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*",
+		"@types/node": "^24.0.0",
+		"typescript": "^5.9.0"
+	},
+	"scripts": {
+		"test": "node --test test/*.test.ts",
+		"typecheck": "tsc --noEmit"
+	},
+	"publishConfig": {
+		"access": "public"
+	}
+}
