@@ -1,6 +1,6 @@
 {
 	"name": "@clementprevot/pi-session-relocate",
-	"version": "0.1.1",
+	"version": "0.2.0",
 	"description": "Pi extension that moves or copies a session to another working directory, with its subagent runs and links, from either end: /migrate pulls one here, /move pushes the current one away",
 	"keywords": [
 		"pi-package",
