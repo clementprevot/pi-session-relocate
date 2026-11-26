@@ -26,8 +26,16 @@ import {
 	type MovePlan,
 } from "./relocate.ts";
 import { pickWithSearch } from "./session-search.ts";
-import { completeDirectory, expandHome, isDirectory, parseWorktreeList, pathsFromConversation } from "./targets.ts";
+import {
+	agentMoveTarget,
+	completeDirectory,
+	expandHome,
+	isDirectory,
+	parseWorktreeList,
+	pathsFromConversation,
+} from "./targets.ts";
 import { trashFile } from "./trash.ts";
+import { Type } from "typebox";
 
 const MOVE_HERE = "Move here: same session, it leaves its old directory";
 const COPY_HERE = "Copy here: new session, the original stays where it is";
@@ -90,6 +98,25 @@ function processState(): ProcessState {
 }
 
 type Notify = ExtensionCommandContext["ui"]["notify"];
+/** Not exported by Pi: the context `withSession` receives after a switch. */
+type ReplacedSessionContext = Parameters<
+	NonNullable<NonNullable<Parameters<ExtensionCommandContext["switchSession"]>[1]>["withSession"]>
+>[0];
+
+/** A move the agent asked for with session_move, run by /move once the turn settles. */
+interface AgentMove {
+	dir: string;
+	then?: string;
+}
+
+const MESSAGE_TYPE = "session-relocate";
+
+function movedMessage(dir: string, then: string | undefined) {
+	const content = then
+		? `This session now belongs to ${dir}. Continue with: ${then}`
+		: `This session now belongs to ${dir}.`;
+	return { customType: MESSAGE_TYPE, content, display: true };
+}
 
 /**
  * Carry the late tail, trash the original, record the move and announce it.
@@ -121,6 +148,14 @@ function completeMove(pi: ExtensionAPI | undefined, notify: Notify, pending: Pen
 
 export default function sessionRelocate(pi: ExtensionAPI) {
 	let sessionCwd = process.cwd();
+	/** The agent's session_move request: queued during its turn, dispatched as /move once the turn settles. */
+	let queuedMove: AgentMove | undefined;
+	let dispatchedMove: AgentMove | undefined;
+
+	/** Tells the model, in this session, why the move it asked for did not happen. */
+	function tellAgent(content: string): void {
+		pi.sendMessage({ customType: MESSAGE_TYPE, content, display: true }, { triggerTurn: true, deliverAs: "followUp" });
+	}
 
 	pi.on("session_start", (_event, ctx) => {
 		sessionCwd = ctx.cwd;
@@ -215,18 +250,30 @@ export default function sessionRelocate(pi: ExtensionAPI) {
 	/**
 	 * Move `sourceFile` to `targetCwd` and switch to it. The original only goes
 	 * to the trash once the moved session started; a switch that never got
-	 * there puts every file back where it was.
+	 * there puts every file back where it was. An agent request skips the
+	 * confirmation, since session_move only accepts worktrees of the same repo,
+	 * and hands its follow-up to the moved session.
 	 */
-	async function moveAndSwitch(ctx: ExtensionCommandContext, sourceFile: string, targetCwd: string, isCurrent: boolean): Promise<void> {
+	async function moveAndSwitch(
+		ctx: ExtensionCommandContext,
+		sourceFile: string,
+		targetCwd: string,
+		isCurrent: boolean,
+		request?: AgentMove,
+	): Promise<void> {
+		const refuse = (message: string, type: "info" | "error") => {
+			ctx.ui.notify(message, type);
+			if (request) tellAgent(`session_move did not happen: ${message}`);
+		};
 		const first = await prepareMove(sourceFile, targetCwd, isCurrent);
 		if (first.error !== undefined) {
-			ctx.ui.notify(first.error, "error");
+			refuse(first.error, "error");
 			return;
 		}
-		if (!(await ctx.ui.confirm("Move this session?", describePlan(first.plan, isCurrent)))) return;
+		if (!request && !(await ctx.ui.confirm("Move this session?", describePlan(first.plan, isCurrent)))) return;
 		const { plan, error } = await prepareMove(sourceFile, targetCwd, isCurrent);
 		if (error !== undefined) {
-			ctx.ui.notify(error, "error");
+			refuse(error, "error");
 			return;
 		}
 
@@ -234,7 +281,7 @@ export default function sessionRelocate(pi: ExtensionAPI) {
 		try {
 			applied = applyMove(plan, isCurrent ? ctx.sessionManager.getLeafId() : undefined);
 		} catch (error) {
-			ctx.ui.notify(`Move failed, nothing changed: ${errorText(error)}`, "error");
+			refuse(`Move failed, nothing changed: ${errorText(error)}`, "error");
 			return;
 		}
 
@@ -250,8 +297,13 @@ export default function sessionRelocate(pi: ExtensionAPI) {
 					withSession: async (fresh) => {
 						switched = true;
 						if (!pending.completed) completeMove(undefined, (message, type) => fresh.ui.notify(message, type), pending);
+						const followUp = request ? movedMessage(plan.targetCwd, request.then) : undefined;
+						const continueIn = async (session: ReplacedSessionContext) => {
+							if (followUp) await session.sendMessage(followUp, { triggerTurn: request?.then !== undefined });
+						};
 						// Pi loaded the moved file before the old runtime wrote its last entries; reopen it to see them.
-						if (pending.carriedTail) await fresh.switchSession(plan.destFile);
+						if (pending.carriedTail) await fresh.switchSession(plan.destFile, { withSession: continueIn });
+						else await continueIn(fresh);
 					},
 				})
 			).cancelled;
@@ -268,7 +320,7 @@ export default function sessionRelocate(pi: ExtensionAPI) {
 			return;
 		}
 		applied.rollback();
-		ctx.ui.notify(cancelled ? "Move cancelled, nothing changed" : `Move failed, files put back: ${errorText(failure)}`, cancelled ? "info" : "error");
+		refuse(cancelled ? "Move cancelled, nothing changed" : `Move failed, files put back: ${errorText(failure)}`, cancelled ? "info" : "error");
 	}
 
 	/** Whether the command's runtime still runs; after teardown its context throws, and the moved copy may be open. */
@@ -392,7 +444,42 @@ export default function sessionRelocate(pi: ExtensionAPI) {
 				ctx.ui.notify(`Not a directory: ${target}`, "error");
 				return;
 			}
-			await moveAndSwitch(ctx, file, target, true);
+			const request = dispatchedMove?.dir === target ? dispatchedMove : undefined;
+			dispatchedMove = undefined;
+			await moveAndSwitch(ctx, file, target, true, request);
 		},
+	});
+
+	pi.registerTool({
+		name: "session_move",
+		label: "Move session",
+		description:
+			"Move this session to another worktree of the same repository, for example the main checkout before deleting the current worktree. " +
+			"The move runs when this turn ends: the session reopens in the target directory with its history, and `then` is delivered there as the next instruction. " +
+			"Only worktrees of the current repository are accepted; for any other directory, ask the user to run /move.",
+		parameters: Type.Object({
+			target: Type.String({ description: "Directory to move to: another worktree of this repository, such as the main checkout" }),
+			then: Type.Optional(Type.String({ description: "What to do once the session runs in the target directory" })),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const fail = (text: string) => ({ content: [{ type: "text" as const, text }], details: {} });
+			const file = ctx.sessionManager.getSessionFile();
+			if (!file || !existsSync(file)) return fail("Nothing is saved in this session yet, so it cannot move.");
+			const checked = agentMoveTarget(params.target, ctx.cwd, await worktrees(ctx.cwd));
+			if (checked.error !== undefined) return fail(checked.error);
+			queuedMove = { dir: checked.dir, then: params.then };
+			return {
+				content: [{ type: "text", text: `Move to ${checked.dir} queued. It runs when this turn ends; stop here.` }],
+				details: { target: checked.dir },
+				terminate: true,
+			};
+		},
+	});
+
+	pi.on("agent_settled", () => {
+		if (!queuedMove) return;
+		dispatchedMove = queuedMove;
+		queuedMove = undefined;
+		pi.sendUserMessage(`/move ${dispatchedMove.dir}`, { expandPromptTemplates: true });
 	});
 }

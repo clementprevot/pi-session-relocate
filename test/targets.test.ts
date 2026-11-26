@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -7,7 +7,7 @@ import { test } from "node:test";
 import type { SessionInfo } from "@earendil-works/pi-coding-agent";
 
 import { migrationCandidates } from "../picker.ts";
-import { completeDirectory, parseWorktreeList, pathsFromConversation, pathsInCommand } from "../targets.ts";
+import { agentMoveTarget, completeDirectory, parseWorktreeList, pathsFromConversation, pathsInCommand } from "../targets.ts";
 
 test("worktree paths come from the porcelain listing, main checkout first", () => {
 	const output = "worktree /work/app\nHEAD abc\nbranch refs/heads/main\n\nworktree /work/app-feature\nHEAD def\ndetached\n";
@@ -70,4 +70,21 @@ test("migration candidates exclude the current directory and can be scoped to th
 		migrationCandidates(sessions, "/work/app-feature", ["/work/app", "/work/app-feature"]).map((s) => s.path),
 		["main"],
 	);
+});
+
+test("an agent may move its session only to another worktree of the same repository", () => {
+	const base = realpathSync(mkdtempSync(join(tmpdir(), "pi-session-relocate-agent-")));
+	const main = join(base, "app");
+	const feature = join(base, "app-feature");
+	const elsewhere = join(base, "elsewhere");
+	for (const dir of [main, feature, elsewhere]) mkdirSync(dir);
+	symlinkSync(main, join(base, "app-link"));
+	const worktrees = [main, feature];
+
+	assert.deepEqual(agentMoveTarget(main, feature, worktrees), { dir: main });
+	assert.deepEqual(agentMoveTarget("../app-link", feature, worktrees), { dir: main });
+	assert.match(agentMoveTarget(elsewhere, feature, worktrees).error ?? "", /not a worktree of this repository/);
+	assert.match(agentMoveTarget(feature, feature, worktrees).error ?? "", /already belongs/);
+	assert.match(agentMoveTarget(join(base, "missing"), feature, worktrees).error ?? "", /Not a directory/);
+	assert.match(agentMoveTarget(main, feature, undefined).error ?? "", /not a worktree/);
 });

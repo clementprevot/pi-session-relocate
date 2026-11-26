@@ -1,5 +1,5 @@
 /** Where a session could go: worktrees of the current repo and directories the conversation used. */
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 
@@ -23,6 +23,26 @@ export function parseWorktreeList(output: string): string[] {
 		.split("\n")
 		.filter((line) => line.startsWith("worktree "))
 		.map((line) => line.slice("worktree ".length).trim());
+}
+
+/**
+ * Where an agent may send its own session without asking: another worktree of
+ * the same repository. Anything else needs the user's /move.
+ */
+export function agentMoveTarget(
+	target: string,
+	cwd: string,
+	worktreeDirs: string[] | undefined,
+): { dir: string; error?: undefined } | { dir?: undefined; error: string } {
+	const dir = resolve(cwd, expandHome(target.trim()));
+	if (!isDirectory(dir)) return { error: `Not a directory: ${dir}` };
+	const real = realpathSync(dir);
+	if (real === realpathSync(cwd)) return { error: `The session already belongs to ${dir}` };
+	const worktrees = (worktreeDirs ?? []).filter(isDirectory).map((path) => realpathSync(path));
+	if (!worktrees.includes(real)) {
+		return { error: `${dir} is not a worktree of this repository. Ask the user to run /move ${dir} instead.` };
+	}
+	return { dir: real };
 }
 
 const SHELL_SEPARATOR = /&&|\|\||[;|\n]/;

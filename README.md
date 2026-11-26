@@ -4,6 +4,7 @@ A [Pi](https://pi.dev) extension that moves a session to another working directo
 
 - `/migrate`, from the directory where the session belongs: pick a session from another directory, then move it here or copy it here
 - `/move [path]`, from inside the session: send it to another directory, picked from the repository's worktrees, the directories the conversation used, or a path you type
+- the `session_move` tool, for the agent: it moves its own session to another worktree of the same repository, for example before it deletes the worktree it runs in
 
 ## Install
 
@@ -30,6 +31,15 @@ Then choose what to do with the session you picked:
 Run `/move` in the session itself. It offers the other worktrees of the repository first, then the directories the conversation worked in (`cd`, `git worktree add`, tool `cwd` arguments), then a typed path. `/move <path>` skips the list and autocompletes directories as you type.
 
 Pi then reopens the session in the new directory, without a restart, and loads that directory's context files, settings and skills.
+
+## Let the agent move its session with session_move
+
+An agent that cleans up after a merge often runs inside the worktree it is about to delete. The `session_move` tool lets it move the session to the main checkout, or any other worktree of the same repository, and carry on there:
+
+- `target`: the directory to move to. It must be listed by `git worktree list` for the current repository; anything else is refused, and the agent is told to ask you for a `/move`.
+- `then`: optional, what to do once the session runs in the target directory.
+
+The move cannot happen in the middle of the agent's turn, so the tool queues it and ends the turn. Once Pi is idle, the extension runs `/move <target>` itself, without the confirmation dialog, since the target is a worktree of the same repository. The session reopens in the target directory, and `then` arrives there as a message that starts the next turn. If the move is refused (a subagent run still active, the session open in another Pi), the agent gets the reason in its session.
 
 ## What a move changes
 
